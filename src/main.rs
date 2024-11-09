@@ -1,3 +1,7 @@
+//Gleb Zvonkov
+//Nov 8, 2024
+//ECE1724
+
 use clap::Parser;
 use reqwest::Error;
 use serde_json::Value;
@@ -5,167 +9,180 @@ use std::collections::HashMap;
 use tokio;
 use url::Url;
 
-#[derive(Parser)]
-#[command(author, version, about, long_about = None)]
+#[derive(Parser)] //command line arguments
 struct Args {
-    /// URL to request
     url: String,
-
-    /// HTTP method (GET or POST)
-    #[arg(short = 'X', long, default_value_t = String::from("GET"))]
+    #[arg(short = 'X', default_value_t = String::from("GET"))] //the method by default is GET
     method: String,
-
-    /// Data for the POST request (key=value&key2=value2)
-    #[arg(short, long)]
+    #[arg(short)]
     data: Option<String>,
-
-    /// JSON data for the POST request
     #[arg(long)]
     json: Option<String>,
 }
 
-#[tokio::main]
+#[tokio::main] //use tokio for asynchronous main
 async fn main() -> Result<(), Error> {
     let args = Args::parse(); //parse the arguments
 
-    let url_str = &args.url; //get the url
-
-    let method = if args.json.is_some() {
-        String::from("POST")
-    } else {
-        args.method.to_uppercase()
-    };
-
-    // Check for valid protocol (http or https)
-    let protocol_valid = url_str.starts_with("http://") || url_str.starts_with("https://");
-    if !protocol_valid {
+    // Check for valid protocol base protocol
+    if !(args.url.starts_with("http://") || args.url.starts_with("https://")) {
         eprintln!(
             "Requesting URL: {}\nMethod: {}\nError: The URL does not have a valid base protocol.",
-            url_str, method
+            args.url, args.method
         );
         return Ok(());
     }
 
-    // Parse the URL with detailed error messages
-    let url = match Url::parse(&url_str) {
-        Ok(url) => url,
+    //parse the URL and handle certain errors
+    match Url::parse(&args.url) {
+        Ok(parsed_url) => parsed_url,
         Err(e) => {
-            let error_message = match e {
-                url::ParseError::RelativeUrlWithoutBase => {
-                    "The URL does not have a valid base protocol."
-                }
-                url::ParseError::InvalidPort => "The URL contains an invalid port number.",
-                url::ParseError::InvalidIpv4Address => "The URL contains an invalid IPv4 address.",
-                url::ParseError::InvalidIpv6Address => "The URL contains an invalid IPv6 address.",
-                _ => "An unknown error occurred while parsing the URL.",
-            };
-            eprintln!(
-                "Requesting URL: {}\nMethod: {}\nError: {}",
-                url_str, method, error_message
-            ); //print the error message
-            return Ok(()); //return from the program
+            handle_url_error(&args, e);
+            return Ok(());
         }
     };
 
-    let client = reqwest::Client::new(); // create a new request
+    //send request and handle error
+    let response = match send_request(&args).await {
+        Ok(response) => response,
+        Err(_) => return Ok(()), // Error occurred, silently return and end execution
+    };
 
-    let response = match if method == "POST" {
-        if let Some(json_data) = &args.json {
-            // If JSON data is provided, send it with the correct header
-            match serde_json::from_str::<serde_json::Value>(json_data) {
-                Ok(_) => {
-                    // If parsing succeeds, send the data with the correct header
-                    client
-                        .post(url.as_str())
-                        .header("Content-Type", "application/json")
-                        .body(json_data.clone())
-                        .send()
-                        .await
-                }
-                Err(_) => panic!("Invalid JSON format: {}", json_data), // Panic if JSON is invalid
-            }
-        } else {
-            // Regular POST with form data
-            let mut data = HashMap::new(); //create a new hashmap
-            if let Some(ref post_data) = args.data {
-                //set the data to post
-                for pair in post_data.split('&') {
-                    //split it on the &
-                    let mut parts = pair.splitn(2, '='); //split it on the equals
-                    if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                        // set the key and value
-                        data.insert(key.to_string(), value.to_string()); // insert as key-value pair
+    //handle the response from website
+    handle_response(response, &args).await?;
+
+    Ok(()) //no error happend
+}
+
+// Function to handle URL parsing errors
+fn handle_url_error(args: &Args, error: url::ParseError) {
+    let error_message = match error {
+        url::ParseError::RelativeUrlWithoutBase => "The URL does not have a valid base protocol.",
+        url::ParseError::InvalidPort => "The URL contains an invalid port number.",
+        url::ParseError::InvalidIpv4Address => "The URL contains an invalid IPv4 address.",
+        url::ParseError::InvalidIpv6Address => "The URL contains an invalid IPv6 address.",
+        _ => "Some error occurred while parsing the URL.",
+    };
+    eprintln!(
+        "Requesting URL: {}\nMethod: {}\nError: {}",
+        args.url, args.method, error_message
+    ); //print out the error message along with other infromation
+}
+
+//Send the request to web
+//return a result
+async fn send_request(args: &Args) -> Result<reqwest::Response, Error> {
+    let client = reqwest::Client::new(); //create a new client to submit requests
+    let method = if args.json.is_some() {
+        String::from("POST") //if there is a json field then its post by defualt
+    } else {
+        args.method.clone() //otheriwse its whatever method was passed in
+    };
+    let response = match method.as_str() {
+        "POST" => {
+            if let Some(json_data) = &args.json {
+                match serde_json::from_str::<serde_json::Value>(json_data) {
+                    //check if its a valid json
+                    Ok(_) => {
+                        client
+                            .post(&args.url)
+                            .header("Content-Type", "application/json")
+                            .body(json_data.clone())
+                            .send()
+                            .await //send the request with the json
+                    }
+                    Err(_) => {
+                        //panic if its not valid json
+                        eprintln!(
+                            "Requesting URL: {}\nMethod: POST\nJSON: {}",
+                            &args.url, json_data
+                        );
+                        panic!("Invalid JSON format: {}", json_data); //panic if its not valid json
                     }
                 }
-            }
-            // Send the POST request with form data
-            client.post(url.as_str()).form(&data).send().await
-        }
-    } else {
-        // Send the GET request
-        client.get(url.as_str()).send().await
-    } {
-        Ok(response) => response,
-        Err(e) => {
-            // Handle connection errors (host resolution or network issues)
-            if e.is_connect() || e.is_timeout() {
-                eprintln!(
-                    "Requesting URL: {}\nMethod: {}\nError: Unable to connect to the server. Perhaps the network is offline or the server hostname cannot be resolved.",
-                    url_str, method
-                );
             } else {
-                eprintln!(
-                    "Requesting URL: {}\nMethod: {}\nError: An unexpected error occurred: {}",
-                    url_str, method, e
-                );
+                //if its not a json, its a key value pair
+                let mut data = HashMap::new(); //create a new hashmap
+                if let Some(ref post_data) = args.data {
+                    for pair in post_data.split('&') {
+                        //split the data on &
+                        let mut parts = pair.splitn(2, '='); //split each key value pair on =
+                        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                            data.insert(key.to_string(), value.to_string()); //insert the key value pair into the hashmap
+                        }
+                    }
+                }
+                client.post(&args.url).form(&data).send().await //send the request with the key value pairs
             }
-            return Ok(()); // Exit after handling the error
         }
+        _ => client.get(&args.url).send().await, //get request, just send normally
     };
-
-    // Handle the response status and body
-    if response.status().is_success() {
-        let body = response.text().await?;
-
-        if method == "POST" {
-            if args.json.is_some() {
-                println!(
-                    "Requesting URL: {}\nMethod: {}\nJSON: {}",
-                    url_str,
-                    method,
-                    args.json.clone().unwrap_or_default()
-                );
+    match response {
+        Ok(response) => Ok(response), //just return the response
+        Err(e) => {
+            if e.is_connect() || e.is_timeout() {
+                //print sepcial error message for timeout or connection issue
+                eprintln!("Requesting URL: {}\nMethod: {}\nError: Unable to connect to the server. Perhaps the network is offline or the server hostname cannot be resolved.", &args.url, args.method);
             } else {
-                println!(
-                    "Requesting URL: {}\nMethod: {}\nData: {}",
-                    url_str,
-                    method,
-                    args.data.unwrap_or_default()
+                eprintln!(
+                    "Requesting URL: {}\nMethod: {}\nError: An unexpected error occurred",
+                    &args.url, args.method
                 );
             }
-        } else {
-            println!("Requesting URL: {}\nMethod: {}", url_str, method);
+            Err(e) //return the error
         }
+    }
+}
 
-        // Attempt to parse and pretty-print JSON, or print plain text if not JSON
+// Function to handle the response
+// returns a result
+async fn handle_response(response: reqwest::Response, args: &Args) -> Result<(), Error> {
+    if response.status().is_success() {
+        let body = response.text().await?; //get the body
+        if args.method == "POST" {
+            print_post_request_info(args).await; //print the data with the post request
+        } else {
+            println!("Requesting URL: {}\nMethod: {}", args.url, args.method); //print for get request
+        }
+        // Attempt to parse and sort JSON if possible
         match serde_json::from_str::<Value>(&body) {
-            //parse the string
             Ok(json_body) => {
-                let sorted_json = serde_json::to_string_pretty(&json_body).unwrap(); //sort the keys
+                let sorted_json = serde_json::to_string_pretty(&json_body).unwrap();
                 println!("Response body (JSON with sorted keys):\n{}", sorted_json);
             }
             Err(_) => {
-                println!("Response body:\n{}", body); //otherwise just print it normally
+                //if its not a json just print it normally
+                println!("Response body:\n{}", body);
             }
         }
     } else {
+        //repsone did not succed, so print the error code
         eprintln!(
             "Requesting URL: {}\nMethod: {}\nError: Request failed with status code: {}",
-            url_str,
-            method,
-            response.status().as_u16() //print the response status number
+            args.url,
+            args.method,
+            response.status().as_u16()
         );
     }
-
     Ok(())
+}
+
+// Function to print POST request information
+// its either has json or data
+async fn print_post_request_info(args: &Args) {
+    if let Some(json_data) = &args.json {
+        //print the json
+        println!(
+            "Requesting URL: {}\nMethod: {}\nJSON: {}",
+            args.url, args.method, json_data
+        );
+    } else {
+        //print the data
+        println!(
+            "Requesting URL: {}\nMethod: {}\nData: {}",
+            args.url,
+            args.method,
+            args.data.clone().unwrap_or_default()
+        );
+    }
 }
